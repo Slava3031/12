@@ -1,0 +1,4 @@
+node_modules/
+*.log
+telemetry.ndjson
+config.local.json
