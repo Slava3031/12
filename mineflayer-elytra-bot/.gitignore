@@ -1,4 +1,6 @@
 node_modules/
 *.log
 telemetry.ndjson
+telemetry.txt
+BotStateSnapshot.java
 config.local.json
