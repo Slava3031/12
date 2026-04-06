@@ -1,0 +1,23 @@
+{
+  "name": "mineflayer-elytra-patrol-bot",
+  "version": "0.2.0",
+  "description": "Autonomous Mineflayer bot scaffold for elytra patrol, obstacle avoidance and telemetry streaming",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "check": "node scripts/check-config.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "mineflayer": "^4.20.1",
+    "mineflayer-pathfinder": "^2.4.5",
+    "minecraft-data": "^3.95.0",
+    "prismarine-chunk": "^1.39.0",
+    "prismarine-physics": "^1.10.0",
+    "vec3": "^0.1.10"
+  }
+}
