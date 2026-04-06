@@ -8,31 +8,66 @@ import { PatrolController } from "./controllers/PatrolController.js";
 import { TargetTracker } from "./controllers/TargetTracker.js";
 import { EvasionController } from "./controllers/EvasionController.js";
 import { RoutePlanner3D } from "./planner/RoutePlanner3D.js";
+import { PathPlanner3D } from "./planner/PathPlanner3D.js";
 import { PhysicsSafetyService } from "./planner/PhysicsSafetyService.js";
+import { PathExecutor } from "./executor/PathExecutor.js";
+import { WorldObserver } from "./observer/WorldObserver.js";
+import { ProcessManager } from "./process/ProcessManager.js";
+import { GoalEvade, GoalPatrol, GoalRecovery, GoalTrack } from "./goals/GoalTypes.js";
 import { TelemetryBus } from "./telemetry/TelemetryBus.js";
-import { PatrolState, PatrolStateMachine } from "./state/PatrolStateMachine.js";
 
 const config = loadConfig();
 const bot = createMineflayerBot(config);
 const telemetry = new TelemetryBus(config);
 
 const latency = new LatencyCompensator(config.network);
-const planner = new RoutePlanner3D(config);
-const patrol = new PatrolController(bot, planner, config.patrol);
+const routePlanner = new RoutePlanner3D(config);
+const patrol = new PatrolController(bot, routePlanner, config.patrol);
 const targets = new TargetTracker(bot);
 const evasion = new EvasionController(bot, config.flight.hostileKeepoutDistance);
 const elytra = new ElytraController(bot, config, latency);
-const fsm = new PatrolStateMachine();
+const processManager = new ProcessManager();
 
 let physicsSafety = null;
+let observer = null;
+let pathPlanner = null;
+let executor = null;
+let latestPlan = null;
+
+function buildCandidates(snapshot) {
+  const goalsOut = [];
+  const threat = evasion.getNearestThreat();
+
+  if (threat && threat.distance <= config.flight.hostileKeepoutDistance) {
+    const escape = evasion.computeEscapeWaypoint(bot.entity.position, threat.entity.position, config.patrol.altitude.target);
+    goalsOut.push(new GoalEvade(threat.entity, config.flight.hostileKeepoutDistance, escape));
+  }
+
+  if (snapshot?.solidAhead) {
+    goalsOut.push(new GoalRecovery("solid_ahead"));
+  }
+
+  if (targets.currentTarget) {
+    goalsOut.push(new GoalTrack(targets.currentTarget));
+  }
+
+  const patrolTarget = patrol.getCurrentWaypoint() ?? routePlanner.nextWaypoint(bot.entity.position);
+  goalsOut.push(new GoalPatrol(patrolTarget));
+  return goalsOut;
+}
 
 bot.once("spawn", async () => {
   physicsSafety = new PhysicsSafetyService(bot);
+  observer = new WorldObserver(bot, physicsSafety);
+  pathPlanner = new PathPlanner3D(routePlanner, config);
+  executor = new PathExecutor(elytra);
 
   const mcData = minecraftData(bot.version);
   const movements = new Movements(bot, mcData);
   movements.canDig = false;
   bot.pathfinder.setMovements(movements);
+
+  await elytra.ensureFlightReady();
 
   telemetry.emit("spawn", {
     username: bot.username,
@@ -42,73 +77,80 @@ bot.once("spawn", async () => {
     gravity: physicsSafety.getGravity(),
     playerHeight: physicsSafety.getPlayerHeight()
   });
-
-  const ready = await elytra.ensureFlightReady();
-  fsm.transition(ready ? PatrolState.PATROL : PatrolState.PREPARE_FLIGHT);
 });
 
 bot.on("physicTick", () => {
-  if (!bot.entity) return;
+  if (!bot.entity || !observer || !pathPlanner || !executor) return;
 
   targets.tick();
   evasion.decayMemory();
   patrol.tick();
 
-  const threat = evasion.getNearestThreat();
-  if (threat && threat.distance <= config.flight.hostileKeepoutDistance) {
-    fsm.transition(PatrolState.RECOVERY);
-    const escape = evasion.computeEscapeWaypoint(bot.entity.position, threat.entity.position, config.patrol.altitude.target);
-    patrol.forceWaypoint(escape);
-  } else if (fsm.state === PatrolState.RECOVERY && fsm.dwellMs > 3000) {
-    fsm.transition(PatrolState.PATROL);
+  const snapshot = observer.tick();
+  const activeGoal = processManager.evaluate(buildCandidates(snapshot));
+
+  // Planner loop (replan on goal changes / no plan / completion)
+  if (!latestPlan || latestPlan.goalType !== activeGoal.getType()) {
+    latestPlan = pathPlanner.plan(activeGoal, bot.entity.position, snapshot);
+    latestPlan.goalType = activeGoal.getType();
+    executor.setPlan(latestPlan);
+
+    telemetry.emit("planner", {
+      goal: activeGoal.getType(),
+      reason: latestPlan.reason,
+      cost: latestPlan.cost,
+      target: latestPlan.target
+    });
   }
 
-  if (fsm.state === PatrolState.RECOVERY) {
-    const escape = patrol.getCurrentWaypoint();
-    elytra.tickCruise(escape);
-    return;
+  // Executor loop
+  const exec = executor.tick(bot);
+  if (exec.done) {
+    if (exec.reason === "stuck_timeout") {
+      latestPlan = pathPlanner.plan(new GoalRecovery("executor_stuck"), bot.entity.position, snapshot);
+      latestPlan.goalType = "RECOVERY";
+      executor.setPlan(latestPlan);
+      telemetry.emit("recovery", { reason: "executor_stuck", target: latestPlan.target });
+      return;
+    }
+
+    if (activeGoal.getType() === "PATROL") {
+      patrol.forceWaypoint(routePlanner.nextWaypoint(bot.entity.position));
+      latestPlan = null;
+    }
   }
 
-  const wp = patrol.getCurrentWaypoint();
-  if (!wp) return;
-
-  const avoid = planner.computeAvoidanceVector(bot);
-  const adjustedWp = wp.plus(avoid);
-
-  if (physicsSafety?.hasSolidBlockAhead(7)) {
-    elytra.recoveryTick();
-  } else {
-    elytra.tickCruise(adjustedWp);
-  }
-
-  // Ground fallback if bot is not gliding yet: pathfinder can still move bot toward next segment.
+  // Pathfinder ground fallback
   const isElytraFlying = typeof bot.entity.isElytraFlying === "function" ? bot.entity.isElytraFlying() : false;
-  if (!isElytraFlying) {
-    bot.pathfinder.setGoal(new goals.GoalNear(adjustedWp.x, adjustedWp.y, adjustedWp.z, 4), true);
+  if (!isElytraFlying && latestPlan?.target) {
+    bot.pathfinder.setGoal(new goals.GoalNear(latestPlan.target.x, latestPlan.target.y, latestPlan.target.z, 4), true);
   }
-});
 
-setInterval(() => {
-  if (!bot.entity) return;
-
-  const threat = evasion.getNearestThreat();
+  const transition = processManager.getLastTransition();
   telemetry.emit("status", {
-    state: fsm.state,
+    goal: activeGoal.getType(),
     pingMs: latency.pingMs,
     leadTicks: latency.estimateLeadTicks(),
     position: bot.entity.position,
     velocity: bot.entity.velocity,
-    nextWaypoint: patrol.getCurrentWaypoint(),
-    visibleTarget: targets.currentTarget?.username ?? null,
-    threat: threat ? { username: threat.entity.username, distance: threat.distance, hostile: threat.hostile } : null,
-    hostileMemory: [...evasion.hostileMemory.keys()]
+    nearestPlayer: snapshot.nearestPlayer,
+    solidAhead: snapshot.solidAhead,
+    loadedChunksNearby: snapshot.loadedChunksNearby,
+    hostileMemory: [...evasion.hostileMemory.keys()],
+    transition
   });
-}, config.telemetry.intervalMs);
+});
 
-bot.on("entityGone", (entity) => {
-  if (!entity?.username) return;
-  if (evasion.hostileMemory.has(entity.username)) {
-    telemetry.emit("threat_left_visibility", { username: entity.username });
+bot.on("chat", (username, message) => {
+  if (username === bot.username) return;
+
+  // Runtime command interface for quick tuning
+  if (message.startsWith("!keepout ")) {
+    const dist = Number(message.split(" ")[1]);
+    if (!Number.isNaN(dist) && dist > 0) {
+      evasion.keepoutDistance = dist;
+      telemetry.emit("command", { by: username, cmd: "keepout", value: dist });
+    }
   }
 });
 
