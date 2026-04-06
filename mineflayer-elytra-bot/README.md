@@ -1,11 +1,19 @@
-# Mineflayer Elytra Patrol Bot (Scaffold)
+# Mineflayer Elytra Patrol Bot (Scaffold v0.2)
 
 Скелет автономного Mineflayer-бота под задачу:
 - полёт на элитрах,
-- патруль по waypoints/кольцу,
-- зачатки обхода препятствий (дальше дописывается в `RoutePlanner3D`),
-- телеметрия в NDJSON/Webhook,
-- учёт latency (150ms+) через lead-ticks.
+- патруль в зоне `-3000..3000` по X/Z,
+- смешанные траектории (random/circle/spiral/mixed),
+- избегание враждебных игроков в радиусе 15 блоков,
+- телеметрия в NDJSON/TXT/Java-snapshot/Webhook,
+- учёт latency 150ms+ и anti-kick пульсы.
+
+## Используемые Prismarine-компоненты
+
+- `mineflayer` — основной бот.
+- `mineflayer-pathfinder` — fallback-перемещение и Goal API.
+- `prismarine-chunk` — подключено в safety/планировщике как база для chunk-aware логики.
+- `prismarine-physics` — используется для параметров физики и safety-адаптера.
 
 ## Быстрый старт
 
@@ -19,41 +27,39 @@ npm start
 ## Конфиг
 
 Создайте `config.local.json` рядом с `package.json`.
-Пример:
 
 ```json
 {
   "server": {
-    "host": "2b2t.org",
+    "host": "localhost",
     "port": 25565,
     "username": "YourBot"
   },
-  "network": {
-    "assumedPingMs": 150
+  "auth": { "method": "offline" },
+  "patrol": {
+    "mode": "mixed",
+    "bounds": { "minX": -3000, "maxX": 3000, "minZ": -3000, "maxZ": 3000 }
   },
+  "flight": { "hostileKeepoutDistance": 15 },
+  "network": { "assumedPingMs": 150 },
   "telemetry": {
     "file": { "enabled": true, "path": "./telemetry.ndjson" },
-    "webhook": { "enabled": false, "url": "" }
+    "text": { "enabled": true, "path": "./telemetry.txt" },
+    "javaSnapshot": { "enabled": true, "path": "./BotStateSnapshot.java" }
   }
 }
 ```
 
-## Архитектура
+## Поведение v0.2
 
-- `src/index.js` — оркестратор цикла бота.
-- `src/controllers/ElytraController.js` — yaw/pitch и режимы cruise/recovery.
-- `src/controllers/PatrolController.js` — управление waypoint-патрулём.
-- `src/controllers/TargetTracker.js` — трекинг игроков.
-- `src/planner/RoutePlanner3D.js` — скелет 3D planner (сюда встраивается полноценный obstacle avoidance).
-- `src/telemetry/*` — поток статусов/ошибок/событий.
+- Бот генерирует waypoint’ы в пределах зоны и летит по ним.
+- При игроке ближе 15 блоков уходит в эвэйд и запоминает ник в hostile-memory.
+- Когда игрок исчезает из видимости, бот возвращается к патрулю.
+- Телеметрия обновляется в реальном времени в файл(ы).
 
 ## Что дописать в первую очередь
 
-1. Реальный 3D A*/hybrid planner для воздуха + оценка препятствий по лучам.
-2. Автоэкипировка элитр/фейерверков + контроль прочности.
-3. Полноценный recovery FSM (stall, lagback, chunk gaps, collision).
-4. Раздельные режимы: patrol / pursue / evade / return-to-route.
-
-## Примечание
-
-Это именно **инженерный скелет**, а не готовый production-бот.
+1. Реальный 3D A*/hybrid planner для воздуха + полноценный raycast scoring.
+2. Полная экипировка элитры/фейерверков/ремонт и контроль durability.
+3. Нормальный PvP/defense модуль (сейчас приоритет — escape/evasion).
+4. Отдельный режим трекинга наземных игроков с предсказанием траектории.

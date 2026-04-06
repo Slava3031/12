@@ -3,23 +3,28 @@ export class PatrolController {
     this.bot = bot;
     this.routePlanner = routePlanner;
     this.patrolConfig = patrolConfig;
-    this.waypoints = patrolConfig.waypoints.length
-      ? patrolConfig.waypoints
-      : routePlanner.buildPatrolWaypoints(patrolConfig.center, patrolConfig.radius);
-    this.currentIndex = 0;
+    this.currentWaypoint = null;
   }
 
   getCurrentWaypoint() {
-    return this.waypoints[this.currentIndex] ?? null;
+    return this.currentWaypoint;
   }
 
-  advanceIfReached(threshold = 16) {
-    const wp = this.getCurrentWaypoint();
-    if (!wp || !this.bot.entity?.position) return;
-
-    const dist = this.bot.entity.position.distanceTo(wp);
-    if (dist <= threshold) {
-      this.currentIndex = (this.currentIndex + 1) % this.waypoints.length;
+  tick() {
+    if (!this.currentWaypoint && this.bot.entity?.position) {
+      this.currentWaypoint = this.routePlanner.nextWaypoint(this.bot.entity.position);
+      return;
     }
+
+    if (!this.currentWaypoint || !this.bot.entity?.position) return;
+
+    const dist = this.bot.entity.position.distanceTo(this.currentWaypoint);
+    if (dist <= this.patrolConfig.waypointReachDistance) {
+      this.currentWaypoint = this.routePlanner.nextWaypoint(this.bot.entity.position);
+    }
+  }
+
+  forceWaypoint(waypoint) {
+    this.currentWaypoint = waypoint;
   }
 }
