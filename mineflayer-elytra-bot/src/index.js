@@ -1,5 +1,7 @@
+import readline from "node:readline";
 import minecraftData from "minecraft-data";
 import { goals, Movements } from "mineflayer-pathfinder";
+import { Vec3 } from "vec3";
 import { loadConfig } from "./config/loadConfig.js";
 import { createMineflayerBot } from "./bot/createMineflayerBot.js";
 import { LatencyCompensator } from "./controllers/LatencyCompensator.js";
@@ -33,6 +35,8 @@ let observer = null;
 let pathPlanner = null;
 let executor = null;
 let latestPlan = null;
+let autopilotEnabled = false;
+let initialized = false;
 
 function buildCandidates(snapshot) {
   const goalsOut = [];
@@ -56,6 +60,64 @@ function buildCandidates(snapshot) {
   return goalsOut;
 }
 
+function applyRecoveryStrategy(exec, currentPos) {
+  switch (exec.strategy) {
+    case "BACKTRACK_LAST_CHECKPOINT": {
+      if (exec.checkpoint) {
+        return new Vec3(exec.checkpoint.x, exec.checkpoint.y + 2, exec.checkpoint.z);
+      }
+      return new Vec3(currentPos.x, currentPos.y + 5, currentPos.z);
+    }
+    case "VERTICAL_BOOST_ESCAPE":
+      return new Vec3(currentPos.x, currentPos.y + 16, currentPos.z);
+    case "LATERAL_ARC_ESCAPE":
+      return new Vec3(currentPos.x + 26, currentPos.y + 4, currentPos.z + 26);
+    default:
+      return new Vec3(currentPos.x, currentPos.y + 8, currentPos.z);
+  }
+}
+
+function handleConsoleCommand(line) {
+  const [cmd, arg] = line.trim().split(/\s+/);
+
+  if (cmd === "start") {
+    autopilotEnabled = true;
+    telemetry.emit("console", { cmd, status: "autopilot_enabled" });
+    console.log("[BOT] Autopilot enabled.");
+    return;
+  }
+
+  if (cmd === "pause") {
+    autopilotEnabled = false;
+    telemetry.emit("console", { cmd, status: "autopilot_paused" });
+    console.log("[BOT] Autopilot paused.");
+    return;
+  }
+
+  if (cmd === "status") {
+    const pos = bot.entity?.position;
+    console.log(`[BOT] status: init=${initialized}, autopilot=${autopilotEnabled}, pos=${pos ? `${pos.x.toFixed(1)} ${pos.y.toFixed(1)} ${pos.z.toFixed(1)}` : "n/a"}`);
+    return;
+  }
+
+  if (cmd === "keepout" && arg) {
+    const dist = Number(arg);
+    if (!Number.isNaN(dist) && dist > 0) {
+      evasion.keepoutDistance = dist;
+      console.log(`[BOT] keepout distance set to ${dist}`);
+      telemetry.emit("console", { cmd, value: dist });
+    }
+    return;
+  }
+
+  if (cmd === "help") {
+    console.log("[BOT] Commands: start | pause | status | keepout <n> | help");
+  }
+}
+
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+rl.on("line", handleConsoleCommand);
+
 bot.once("spawn", async () => {
   physicsSafety = new PhysicsSafetyService(bot);
   observer = new WorldObserver(bot, physicsSafety);
@@ -68,6 +130,7 @@ bot.once("spawn", async () => {
   bot.pathfinder.setMovements(movements);
 
   await elytra.ensureFlightReady();
+  initialized = true;
 
   telemetry.emit("spawn", {
     username: bot.username,
@@ -75,12 +138,15 @@ bot.once("spawn", async () => {
     position: bot.entity.position,
     pingMs: latency.pingMs,
     gravity: physicsSafety.getGravity(),
-    playerHeight: physicsSafety.getPlayerHeight()
+    playerHeight: physicsSafety.getPlayerHeight(),
+    note: "Autopilot paused by default. Use console command: start"
   });
+
+  console.log("[BOT] Spawned. Give resources now, then type 'start' in console.");
 });
 
 bot.on("physicTick", () => {
-  if (!bot.entity || !observer || !pathPlanner || !executor) return;
+  if (!autopilotEnabled || !bot.entity || !observer || !pathPlanner || !executor) return;
 
   targets.tick();
   evasion.decayMemory();
@@ -89,9 +155,8 @@ bot.on("physicTick", () => {
   const snapshot = observer.tick();
   const activeGoal = processManager.evaluate(buildCandidates(snapshot));
 
-  // Planner loop (replan on goal changes / no plan / completion)
   if (!latestPlan || latestPlan.goalType !== activeGoal.getType()) {
-    latestPlan = pathPlanner.plan(activeGoal, bot.entity.position, snapshot);
+    latestPlan = pathPlanner.plan(activeGoal, bot.entity.position, snapshot, observer);
     latestPlan.goalType = activeGoal.getType();
     executor.setPlan(latestPlan);
 
@@ -103,14 +168,16 @@ bot.on("physicTick", () => {
     });
   }
 
-  // Executor loop
   const exec = executor.tick(bot);
   if (exec.done) {
     if (exec.reason === "stuck_timeout") {
-      latestPlan = pathPlanner.plan(new GoalRecovery("executor_stuck"), bot.entity.position, snapshot);
+      const recoveryTarget = applyRecoveryStrategy(exec, bot.entity.position);
+      latestPlan = pathPlanner.plan(new GoalRecovery(exec.strategy), bot.entity.position, snapshot, observer);
       latestPlan.goalType = "RECOVERY";
+      latestPlan.target = recoveryTarget;
+      latestPlan.segments = [recoveryTarget];
       executor.setPlan(latestPlan);
-      telemetry.emit("recovery", { reason: "executor_stuck", target: latestPlan.target });
+      telemetry.emit("recovery", { reason: exec.reason, strategy: exec.strategy, target: recoveryTarget });
       return;
     }
 
@@ -120,13 +187,11 @@ bot.on("physicTick", () => {
     }
   }
 
-  // Pathfinder ground fallback
   const isElytraFlying = typeof bot.entity.isElytraFlying === "function" ? bot.entity.isElytraFlying() : false;
   if (!isElytraFlying && latestPlan?.target) {
     bot.pathfinder.setGoal(new goals.GoalNear(latestPlan.target.x, latestPlan.target.y, latestPlan.target.z, 4), true);
   }
 
-  const transition = processManager.getLastTransition();
   telemetry.emit("status", {
     goal: activeGoal.getType(),
     pingMs: latency.pingMs,
@@ -136,22 +201,11 @@ bot.on("physicTick", () => {
     nearestPlayer: snapshot.nearestPlayer,
     solidAhead: snapshot.solidAhead,
     loadedChunksNearby: snapshot.loadedChunksNearby,
+    chunkReliability: snapshot.chunkReliability,
+    hazardDensity: snapshot.hazardDensity,
     hostileMemory: [...evasion.hostileMemory.keys()],
-    transition
+    transition: processManager.getLastTransition()
   });
-});
-
-bot.on("chat", (username, message) => {
-  if (username === bot.username) return;
-
-  // Runtime command interface for quick tuning
-  if (message.startsWith("!keepout ")) {
-    const dist = Number(message.split(" ")[1]);
-    if (!Number.isNaN(dist) && dist > 0) {
-      evasion.keepoutDistance = dist;
-      telemetry.emit("command", { by: username, cmd: "keepout", value: dist });
-    }
-  }
 });
 
 bot.on("kicked", (reason) => telemetry.emit("kicked", { reason }));

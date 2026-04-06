@@ -1,3 +1,7 @@
+import { Vec3 } from "vec3";
+
+const HAZARD_BLOCKS = new Set(["lava", "water", "fire", "soul_fire", "cactus"]);
+
 export class WorldObserver {
   constructor(bot, physicsSafety) {
     this.bot = bot;
@@ -5,21 +9,33 @@ export class WorldObserver {
     this.snapshot = {
       solidAhead: false,
       loadedChunksNearby: 0,
-      nearestPlayer: null
+      nearestPlayer: null,
+      chunkReliability: 1,
+      hazardDensity: 0
     };
   }
 
   tick() {
     if (!this.bot.entity) return this.snapshot;
 
-    const nearestPlayer = this.#nearestPlayer();
+    const loadedChunksNearby = this.#countLoadedChunks();
+    const chunkReliability = loadedChunksNearby / 9;
+
     this.snapshot = {
       solidAhead: this.physicsSafety?.hasSolidBlockAhead(8) ?? false,
-      loadedChunksNearby: this.#countLoadedChunks(),
-      nearestPlayer
+      loadedChunksNearby,
+      nearestPlayer: this.#nearestPlayer(),
+      chunkReliability,
+      hazardDensity: this.#hazardDensity(this.bot.entity.position, 10)
     };
 
     return this.snapshot;
+  }
+
+  getNodePenalty(pos) {
+    const hazard = this.#hazardDensity(pos, 3);
+    const reliabilityPenalty = (1 - this.snapshot.chunkReliability) * 30;
+    return hazard * 50 + reliabilityPenalty;
   }
 
   #nearestPlayer() {
@@ -33,6 +49,24 @@ export class WorldObserver {
       username: p.username,
       distance: this.bot.entity.position.distanceTo(p.position)
     };
+  }
+
+  #hazardDensity(origin, radius) {
+    let samples = 0;
+    let hazards = 0;
+
+    for (let dx = -radius; dx <= radius; dx += 2) {
+      for (let dz = -radius; dz <= radius; dz += 2) {
+        const pos = new Vec3(Math.round(origin.x + dx), Math.round(origin.y - 1), Math.round(origin.z + dz));
+        const block = this.bot.blockAt(pos);
+        if (!block) continue;
+        samples += 1;
+        if (HAZARD_BLOCKS.has(block.name) || HAZARD_BLOCKS.has(block.displayName?.toLowerCase())) hazards += 1;
+      }
+    }
+
+    if (samples === 0) return 0;
+    return hazards / samples;
   }
 
   #countLoadedChunks() {

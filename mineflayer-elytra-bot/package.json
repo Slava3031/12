@@ -1,6 +1,6 @@
 {
   "name": "mineflayer-elytra-patrol-bot",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Autonomous Mineflayer bot scaffold for elytra patrol, obstacle avoidance and telemetry streaming",
   "type": "module",
   "main": "src/index.js",

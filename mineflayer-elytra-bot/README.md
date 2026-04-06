@@ -37,6 +37,15 @@ npm start
 
 4. Если LAN-порт не `25565`, исправь `server.port` в `config.local.json`.
 
+После запуска бот **по умолчанию на паузе**, чтобы ты успел выдать ресурсы.
+Команды в консоли процесса:
+
+- `start` — включить автопилот;
+- `pause` — пауза автопилота;
+- `status` — текущий статус;
+- `keepout 15` — изменить дистанцию избегания;
+- `help` — показать команды.
+
 ## Используемые Prismarine-компоненты
 
 - `mineflayer` — основной бот.
@@ -89,8 +98,10 @@ npm start
 
 - Goal/process контур с приоритетами (`Evade > Recovery > Track > Patrol`).
 - Разделение на observer/planner/executor loops.
-- Segment-based executor с timeout и recovery replan.
-- Runtime-команда `!keepout <distance>` для быстрой смены дистанции избегания.
+- Segment-based executor с timeout, backtrack и recovery-стратегиями.
+- Runtime-команда в консоли `keepout <distance>` для быстрой смены дистанции избегания.
+- 3D A*/Hybrid-подобный planner с cost map (distance + hazard + chunk reliability penalties).
+- Rich observer: hazard layers + chunk reliability scoring.
 
 ## Parity план с Baritone
 
